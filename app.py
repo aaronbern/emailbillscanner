@@ -9,24 +9,31 @@ def home():
 
 @app.route('/api/cron/scan', methods=['GET'])
 def trigger_scan():
-    new_bills = scan_emails(query="subject:(bill OR statement OR invoice) is:unread")
-    
-    for bill in new_bills:
-        pay_link = f"{VERCEL_URL}/api/mark_paid/{bill['id']}"
-        subject = f"🧾 New Bill: {bill['subject']}"
+    try:
+        new_bills = scan_emails(query="subject:(bill OR statement OR invoice OR HOA OR dues) is:unread")
         
-        html_body = f"""
-        <h2>New Bill Detected</h2>
-        <p><strong>Amount:</strong> {bill['amount']}</p>
-        <p><strong>Due Date:</strong> {bill['due_date']}</p>
-        <br>
-        <a href="{pay_link}" style="padding: 10px 20px; background-color: #28a745; color: white; text-decoration: none; border-radius: 5px; font-weight: bold;">
-            Mark as Paid ✅
-        </a>
-        """
-        send_email_notification(subject, html_body)
+        for bill in new_bills:
+            pay_link = f"{VERCEL_URL}/api/mark_paid/{bill['id']}"
+            subject = f"🧾 New Bill: {bill['subject']}"
+            
+            html_body = f"""
+            <h2>New Bill Detected</h2>
+            <p><strong>Amount:</strong> {bill['amount']}</p>
+            <p><strong>Due Date:</strong> {bill['due_date']}</p>
+            <br>
+            <a href="{pay_link}" style="padding: 10px 20px; background-color: #28a745; color: white; text-decoration: none; border-radius: 5px; font-weight: bold;">
+                Mark as Paid ✅
+            </a>
+            """
+            send_email_notification(subject, html_body)
+            
+        return jsonify({"status": "success", "processed": len(new_bills)})
         
-    return jsonify({"status": "success", "processed": len(new_bills)})
+    except Exception as e:
+        # If the automated cron job fails, it emails you the error!
+        error_msg = str(e)
+        send_email_notification("⚠️ Bill Scanner Error", f"Your 8 AM scan failed to run. Error details: <br><br>{error_msg}")
+        return jsonify({"status": "error", "message": error_msg}), 500
 
 @app.route('/api/cron/remind', methods=['GET'])
 def trigger_reminders():
@@ -49,11 +56,15 @@ def trigger_reminders():
 
 @app.route('/api/manual_backward_scan', methods=['GET'])
 def backward_scan():
-    """Run this manually in your browser: /api/manual_backward_scan?after=2026/01/01"""
     after_date = request.args.get('after', '2026/01/01')
-    query = f"subject:(bill OR statement OR invoice) after:{after_date}"
-    historical_bills = scan_emails(query=query)
-    return jsonify({"status": "success", "historical_bills_added": len(historical_bills)})
+    query = f"subject:(bill OR statement OR invoice OR HOA OR dues) after:{after_date}"
+    
+    try:
+        historical_bills = scan_emails(query=query)
+        return jsonify({"status": "success", "historical_bills_added": len(historical_bills)})
+    except Exception as e:
+        # Pushes the exact API error to your web browser
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/api/mark_paid/<int:bill_id>', methods=['GET'])
 def mark_paid(bill_id):

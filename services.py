@@ -45,9 +45,17 @@ def send_email_notification(subject, body_html):
         print(f"Failed to send email: {e}")
 
 def parse_batch_with_gemini(emails_list):
-    """Processes multiple emails in ONE API call to bypass rate limits."""
-    # Using 3.1 Flash Lite because it has 500 daily requests on the free tier!
-    model = genai.GenerativeModel('gemini-3.1-flash-lite')
+    """Processes multiple emails in ONE API call with robust model fallbacks."""
+    if not emails_list:
+        return []
+
+    # Fallback cascade: Tries newest preview, then stable, then older fast models
+    models_to_try = [
+        'gemini-3.1-flash-lite-preview',
+        'gemini-3.1-flash-lite',
+        'gemini-2.5-flash',
+        'gemini-2.0-flash'
+    ]
     
     prompt = """
     Extract the bill amount and due date for each email snippet below.
@@ -61,19 +69,26 @@ def parse_batch_with_gemini(emails_list):
     for e in emails_list:
         prompt += f"\nMessage ID: {e['id']}\nText: {e['snippet']}\n---\n"
         
-    try:
-        response = model.generate_content(prompt)
-        clean_text = response.text.strip().replace('```json', '').replace('```', '')
-        return json.loads(clean_text)
-    except Exception as e:
-        print(f"Gemini Batch Parse Error: {e}")
-        return []
+    last_error = None
+    
+    for model_name in models_to_try:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            clean_text = response.text.strip().replace('```json', '').replace('```', '')
+            return json.loads(clean_text)
+        except Exception as e:
+            print(f"Model {model_name} failed: {e}")
+            last_error = e
+            continue # Try the next model in the list
+            
+    # If the loop finishes and all models failed, do NOT fail silently!
+    raise Exception(f"All Gemini models failed. Last error: {last_error}")
 
 def scan_emails(query="subject:(bill OR statement OR invoice OR HOA OR dues) is:unread"):
     """Searches Gmail, batches them into 1 Gemini call, saves to DB."""
     service = get_gmail_service()
     
-    # Grab up to 40 emails at once to keep the batch safe
     results = service.users().messages().list(userId='me', q=query, maxResults=40).execute()
     messages = results.get('messages', [])
     
@@ -83,7 +98,6 @@ def scan_emails(query="subject:(bill OR statement OR invoice OR HOA OR dues) is:
     emails_to_parse = []
     bills_found = []
     
-    # 1. Collect all the text snippets fast
     for msg in messages:
         msg_data = service.users().messages().get(userId='me', id=msg['id']).execute()
         headers = msg_data['payload']['headers']
@@ -96,10 +110,9 @@ def scan_emails(query="subject:(bill OR statement OR invoice OR HOA OR dues) is:
             'snippet': snippet
         })
         
-    # 2. Send all snippets to Gemini at once! (Only costs 1 API request)
+    # This will now raise an error if it fails, which app.py will catch
     parsed_results = parse_batch_with_gemini(emails_to_parse)
     
-    # 3. Save the returned results
     for data in parsed_results:
         msg_id = data.get('message_id')
         amount = data.get('amount')
@@ -116,15 +129,13 @@ def scan_emails(query="subject:(bill OR statement OR invoice OR HOA OR dues) is:
                 'status': 'unpaid'
             }
             try:
-                # Insert into Supabase. Fails gracefully if message_id already exists.
                 res = supabase.table('bills').insert(bill_data).execute()
                 bill_data['id'] = res.data[0]['id']
                 bills_found.append(bill_data)
-            except Exception as e:
-                pass # Skips if already in database
+            except Exception:
+                pass 
                 
             try:
-                # Remove UNREAD label
                 service.users().messages().modify(userId='me', id=msg_id, body={'removeLabelIds': ['UNREAD']}).execute()
             except Exception:
                 pass
