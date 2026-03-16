@@ -44,43 +44,72 @@ def send_email_notification(subject, body_html):
     except Exception as e:
         print(f"Failed to send email: {e}")
 
-def parse_with_gemini(text):
-    """Robust JSON extraction using Gemini Flash."""
-    model = genai.GenerativeModel('gemini-2.5-flash')
-    prompt = f"""
-    Extract the bill amount and due date from this text. 
-    Return ONLY a valid JSON object with keys "amount" and "due_date".
-    Example: {{"amount": "$50.00", "due_date": "10/15/2026"}}
+def parse_batch_with_gemini(emails_list):
+    """Processes multiple emails in ONE API call to bypass rate limits."""
+    # Using 3.1 Flash Lite because it has 500 daily requests on the free tier!
+    model = genai.GenerativeModel('gemini-3.1-flash-lite')
+    
+    prompt = """
+    Extract the bill amount and due date for each email snippet below.
+    Return ONLY a valid JSON array of objects. 
+    Each object MUST have the keys: "message_id", "amount", and "due_date".
+    Example: [{"message_id": "18a2b", "amount": "$50.00", "due_date": "10/15/2026"}]
     If missing, use null.
-    Text: {text}
+    
+    Emails:
     """
+    for e in emails_list:
+        prompt += f"\nMessage ID: {e['id']}\nText: {e['snippet']}\n---\n"
+        
     try:
         response = model.generate_content(prompt)
         clean_text = response.text.strip().replace('```json', '').replace('```', '')
-        data = json.loads(clean_text)
-        return data.get('amount'), data.get('due_date')
+        return json.loads(clean_text)
     except Exception as e:
-        print(f"Gemini Parse Error: {e}")
-        return None, None
+        print(f"Gemini Batch Parse Error: {e}")
+        return []
 
-def scan_emails(query="subject:(bill OR statement OR invoice) is:unread"):
-    """Searches Gmail, parses bills, saves to DB, and marks as read."""
+def scan_emails(query="subject:(bill OR statement OR invoice OR HOA OR dues) is:unread"):
+    """Searches Gmail, batches them into 1 Gemini call, saves to DB."""
     service = get_gmail_service()
-    results = service.users().messages().list(userId='me', q=query).execute()
+    
+    # Grab up to 40 emails at once to keep the batch safe
+    results = service.users().messages().list(userId='me', q=query, maxResults=40).execute()
     messages = results.get('messages', [])
     
+    if not messages:
+        return []
+
+    emails_to_parse = []
     bills_found = []
+    
+    # 1. Collect all the text snippets fast
     for msg in messages:
         msg_data = service.users().messages().get(userId='me', id=msg['id']).execute()
         headers = msg_data['payload']['headers']
         subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'Unknown Bill')
         snippet = msg_data.get('snippet', '')
         
-        amount, due_date = parse_with_gemini(snippet)
+        emails_to_parse.append({
+            'id': msg['id'],
+            'subject': subject,
+            'snippet': snippet
+        })
         
-        if amount and due_date:
+    # 2. Send all snippets to Gemini at once! (Only costs 1 API request)
+    parsed_results = parse_batch_with_gemini(emails_to_parse)
+    
+    # 3. Save the returned results
+    for data in parsed_results:
+        msg_id = data.get('message_id')
+        amount = data.get('amount')
+        due_date = data.get('due_date')
+        
+        if msg_id and amount and due_date:
+            subject = next((e['subject'] for e in emails_to_parse if e['id'] == msg_id), 'Unknown Bill')
+            
             bill_data = {
-                'message_id': msg['id'],
+                'message_id': msg_id,
                 'subject': subject,
                 'amount': amount,
                 'due_date': due_date,
@@ -92,10 +121,13 @@ def scan_emails(query="subject:(bill OR statement OR invoice) is:unread"):
                 bill_data['id'] = res.data[0]['id']
                 bills_found.append(bill_data)
             except Exception as e:
-                print(f"Skipped duplicate or DB error: {e}")
+                pass # Skips if already in database
                 
-            # Remove UNREAD label
-            service.users().messages().modify(userId='me', id=msg['id'], body={'removeLabelIds': ['UNREAD']}).execute()
+            try:
+                # Remove UNREAD label
+                service.users().messages().modify(userId='me', id=msg_id, body={'removeLabelIds': ['UNREAD']}).execute()
+            except Exception:
+                pass
             
     return bills_found
 
