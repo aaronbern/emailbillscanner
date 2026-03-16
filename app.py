@@ -5,7 +5,50 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bill Scanner Online."
+    # A clean, mobile-friendly HTML dashboard
+    html_dashboard = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Bill Scanner Dashboard</title>
+        <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f4f7f6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
+            h1 { text-align: center; color: #2c3e50; }
+            .card { background: white; border-radius: 10px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+            .btn { display: inline-block; width: 100%; box-sizing: border-box; padding: 12px 20px; margin: 8px 0; text-align: center; text-decoration: none; border-radius: 6px; font-weight: bold; border: none; cursor: pointer; font-size: 16px; transition: opacity 0.2s; }
+            .btn:hover { opacity: 0.9; }
+            .btn-scan { background-color: #28a745; color: white; }
+            .btn-remind { background-color: #ffc107; color: #333; }
+            .btn-historical { background-color: #007bff; color: white; }
+            input[type="date"] { width: 100%; padding: 10px; margin-top: 8px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 5px; box-sizing: border-box; font-size: 16px; }
+            p { margin-top: 0; color: #555; }
+        </style>
+    </head>
+    <body>
+        <h1>🧾 Command Center</h1>
+        
+        <div class="card">
+            <h3>Automated Jobs</h3>
+            <p>Manually trigger your daily Vercel cron jobs.</p>
+            <a href="/api/cron/scan" target="_blank" class="btn btn-scan">🔍 Run Inbox Scan Now</a>
+            <a href="/api/cron/remind" target="_blank" class="btn btn-remind">⚠️ Send Reminders Now</a>
+        </div>
+
+        <div class="card">
+            <h3>Historical Scan</h3>
+            <p>Select a date to scan all older emails from that point forward.</p>
+            <form action="/api/manual_backward_scan" method="GET" target="_blank">
+                <label for="after"><strong>Scan emails after:</strong></label>
+                <input type="date" id="after" name="after" value="2026-01-01" required>
+                <button type="submit" class="btn btn-historical">⏪ Run Historical Scan</button>
+            </form>
+        </div>
+    </body>
+    </html>
+    """
+    return html_dashboard
 
 @app.route('/api/cron/scan', methods=['GET'])
 def trigger_scan():
@@ -30,7 +73,6 @@ def trigger_scan():
         return jsonify({"status": "success", "processed": len(new_bills)})
         
     except Exception as e:
-        # If the automated cron job fails, it emails you the error!
         error_msg = str(e)
         send_email_notification("⚠️ Bill Scanner Error", f"Your 8 AM scan failed to run. Error details: <br><br>{error_msg}")
         return jsonify({"status": "error", "message": error_msg}), 500
@@ -56,14 +98,16 @@ def trigger_reminders():
 
 @app.route('/api/manual_backward_scan', methods=['GET'])
 def backward_scan():
-    after_date = request.args.get('after', '2026/01/01')
+    # The form automatically formats the date as YYYY-MM-DD which is perfect for Gmail
+    after_date = request.args.get('after', '2026-01-01')
+    
+    # We remove the 'is:unread' tag here so it scans read emails too!
     query = f"subject:(bill OR statement OR invoice OR HOA OR dues) after:{after_date}"
     
     try:
         historical_bills = scan_emails(query=query)
         return jsonify({"status": "success", "historical_bills_added": len(historical_bills)})
     except Exception as e:
-        # Pushes the exact API error to your web browser
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/api/mark_paid/<int:bill_id>', methods=['GET'])
