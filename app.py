@@ -1,7 +1,18 @@
 from flask import Flask, jsonify, request
+from datetime import datetime, timedelta
+import hmac, hashlib, os
 from services import scan_emails, send_email_notification, get_unpaid_bills, supabase, VERCEL_URL
 
 app = Flask(__name__)
+
+TOKEN_SECRET = os.environ.get('TOKEN_SECRET', '')
+
+def generate_token(bill_id):
+    return hmac.new(TOKEN_SECRET.encode(), str(bill_id).encode(), hashlib.sha256).hexdigest()
+
+def verify_token(bill_id, token):
+    expected = generate_token(bill_id)
+    return hmac.compare_digest(expected, token)
 
 @app.route('/')
 def home():
@@ -53,10 +64,11 @@ def home():
 @app.route('/api/cron/scan', methods=['GET'])
 def trigger_scan():
     try:
-        new_bills = scan_emails(query="subject:(bill OR statement OR invoice OR HOA OR dues) is:unread")
+        after_date = (datetime.utcnow() - timedelta(hours=24)).strftime('%Y/%m/%d')
+        new_bills = scan_emails(query=f"subject:(bill OR statement OR invoice OR HOA OR dues) is:unread after:{after_date}")
         
         for bill in new_bills:
-            pay_link = f"{VERCEL_URL}/api/mark_paid/{bill['id']}"
+            pay_link = f"{VERCEL_URL}/api/mark_paid/{bill['id']}?token={generate_token(bill['id'])}"
             subject = f"🧾 New Bill: {bill['subject']}"
             
             html_body = f"""
@@ -80,20 +92,45 @@ def trigger_scan():
 @app.route('/api/cron/remind', methods=['GET'])
 def trigger_reminders():
     unpaid = get_unpaid_bills()
+    if not unpaid:
+        return jsonify({"status": "success", "reminders": 0})
+
+    rows_html = ""
     for bill in unpaid:
-        pay_link = f"{VERCEL_URL}/api/mark_paid/{bill['id']}"
-        subject = f"⚠️ REMINDER: {bill['subject']} is Due!"
-        
-        html_body = f"""
-        <h2 style="color: #dc3545;">Bill Reminder</h2>
-        <p>Your bill for <strong>{bill['amount']}</strong> is due on <strong>{bill['due_date']}</strong>.</p>
-        <br>
-        <a href="{pay_link}" style="padding: 10px 20px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px; font-weight: bold;">
-            I just paid this! ✅
-        </a>
+        pay_link = f"{VERCEL_URL}/api/mark_paid/{bill['id']}?token={generate_token(bill['id'])}"
+        rows_html += f"""
+        <tr>
+            <td style="padding: 12px 16px; border-bottom: 1px solid #eee;">{bill['subject']}</td>
+            <td style="padding: 12px 16px; border-bottom: 1px solid #eee; text-align: center;"><strong>{bill['amount']}</strong></td>
+            <td style="padding: 12px 16px; border-bottom: 1px solid #eee; text-align: center;">{bill['due_date']}</td>
+            <td style="padding: 12px 16px; border-bottom: 1px solid #eee; text-align: center;">
+                <a href="{pay_link}" style="padding: 8px 16px; background-color: #28a745; color: white; text-decoration: none; border-radius: 5px; font-weight: bold; white-space: nowrap;">
+                    ✅ Mark Paid
+                </a>
+            </td>
+        </tr>
         """
-        send_email_notification(subject, html_body)
-        
+
+    html_body = f"""
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 640px; margin: 0 auto;">
+        <h2 style="color: #dc3545;">⚠️ You have {len(unpaid)} unpaid bill{'s' if len(unpaid) > 1 else ''}</h2>
+        <table style="width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
+            <thead>
+                <tr style="background-color: #f8f9fa;">
+                    <th style="padding: 12px 16px; text-align: left; color: #555;">Bill</th>
+                    <th style="padding: 12px 16px; text-align: center; color: #555;">Amount</th>
+                    <th style="padding: 12px 16px; text-align: center; color: #555;">Due Date</th>
+                    <th style="padding: 12px 16px; text-align: center; color: #555;">Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows_html}
+            </tbody>
+        </table>
+    </div>
+    """
+
+    send_email_notification(f"⚠️ Bill Reminder: {len(unpaid)} unpaid bill{'s' if len(unpaid) > 1 else ''}", html_body)
     return jsonify({"status": "success", "reminders": len(unpaid)})
 
 @app.route('/api/manual_backward_scan', methods=['GET'])
@@ -112,6 +149,9 @@ def backward_scan():
 
 @app.route('/api/mark_paid/<int:bill_id>', methods=['GET'])
 def mark_paid(bill_id):
+    token = request.args.get('token', '')
+    if not verify_token(bill_id, token):
+        return "Invalid or missing token.", 403
     try:
         supabase.table('bills').update({'status': 'paid'}).eq('id', bill_id).execute()
         return f"""
