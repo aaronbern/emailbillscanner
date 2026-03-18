@@ -136,7 +136,7 @@ def trigger_reminders():
 @app.route('/api/manual_backward_scan', methods=['GET'])
 def backward_scan():
     # The form automatically formats the date as YYYY-MM-DD which is perfect for Gmail
-    after_date = request.args.get('after', '2026-01-01')
+    after_date = request.args.get('after', '2026-01-01').replace('-', '/')
     
     # We remove the 'is:unread' tag here so it scans read emails too!
     query = f"subject:(bill OR statement OR invoice OR HOA OR dues) after:{after_date}"
