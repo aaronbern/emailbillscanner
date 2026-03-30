@@ -21,7 +21,7 @@ def get_gmail_service():
     creds_dict = json.loads(os.environ.get('GMAIL_TOKEN_JSON'))
     creds = Credentials.from_authorized_user_info(creds_dict)
     
-    if creds and creds.expired and creds.refresh_token:
+    if not creds.valid and creds.refresh_token:
         creds.refresh(Request())
         
     return build('gmail', 'v1', credentials=creds)

@@ -86,7 +86,10 @@ def trigger_scan():
         
     except Exception as e:
         error_msg = str(e)
-        send_email_notification("⚠️ Bill Scanner Error", f"Your 8 AM scan failed to run. Error details: <br><br>{error_msg}")
+        try:
+            send_email_notification("⚠️ Bill Scanner Error", f"Your 8 AM scan failed to run. Error details: <br><br>{error_msg}")
+        except Exception as notify_err:
+            print(f"Failed to send error notification: {notify_err}")
         return jsonify({"status": "error", "message": error_msg}), 500
 
 @app.route('/api/cron/remind', methods=['GET'])
